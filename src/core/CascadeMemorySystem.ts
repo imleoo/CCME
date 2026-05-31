@@ -1,8 +1,12 @@
 import { Event, RetrievalQuery, RetrievalResult, LayerState } from '../types';
 import { EventEncoder, RawEvent } from './EventEncoder';
 import { ShortTermBuffer } from '../storage/ShortTermBuffer';
-import { MidTermStore } from '../storage/MidTermStore';
-import { LongTermStore } from '../storage/LongTermStore';
+import { RedisMidTermStore } from '../storage/RedisMidTermStore';
+import { PostgresLongTermStore } from '../storage/PostgresLongTermStore';
+import { RedisClient } from '../storage/clients/RedisClient';
+import { PostgresClient } from '../storage/clients/PostgresClient';
+import { MidTermStore } from '../storage/MidTermStore'; // Keep for backwards compatibility or tests if needed
+import { LongTermStore } from '../storage/LongTermStore'; // Keep for backwards compatibility or tests if needed
 import { ReplayWorker, ReplayStats } from './ReplayWorker';
 import { ForgettingService, ForgettingStats } from './ForgettingService';
 import { ExplainabilityLogger } from './ExplainabilityLogger';
@@ -40,34 +44,59 @@ export interface SystemStats {
 export class CascadeMemorySystem {
   private encoder: EventEncoder;
   private shortTermBuffer: ShortTermBuffer;
-  private midTermStore: MidTermStore;
-  private longTermStore: LongTermStore;
+  // Use persistent stores if enabled, otherwise fallback (for tests)
+  // For this task, we assume we switch to persistent stores
+  private midTermStore: RedisMidTermStore | MidTermStore; 
+  private longTermStore: PostgresLongTermStore | LongTermStore;
+  
+  private redisClient?: RedisClient;
+  private pgClient?: PostgresClient;
+
   private replayWorker: ReplayWorker;
   private forgettingService: ForgettingService;
   private logger: ExplainabilityLogger;
   
   private config: SystemConfig;
   
-  constructor(config: Partial<SystemConfig> = {}) {
+  constructor(config: Partial<SystemConfig> = {}, usePersistence: boolean = true) {
     this.config = { ...DEFAULT_CONFIG, ...config };
     
-    // Initialize components
-    this.encoder = new EventEncoder(this.config.VECTOR_DIM);
+    this.encoder = new EventEncoder(
+      this.config.VECTOR_DIM,
+      this.config.REPLAY.minWaitTime
+    );
+
     this.shortTermBuffer = new ShortTermBuffer(
       this.config.CAPACITY.shortTerm,
       this.config.TAU[0],
       this.config.DECAY_RATES[0]
     );
-    this.midTermStore = new MidTermStore(
-      this.config.CAPACITY.midTerm,
-      this.config.TAU[1],
-      this.config.DECAY_RATES[1]
-    );
-    this.longTermStore = new LongTermStore(
-      this.config.CAPACITY.longTerm,
-      this.config.TAU[2],
-      this.config.DECAY_RATES[2]
-    );
+
+    if (usePersistence) {
+      this.redisClient = new RedisClient();
+      this.midTermStore = new RedisMidTermStore(
+        this.config.CAPACITY.midTerm,
+        this.redisClient
+      );
+
+      this.pgClient = new PostgresClient();
+      this.longTermStore = new PostgresLongTermStore(
+        this.config.CAPACITY.longTerm,
+        this.pgClient
+      );
+    } else {
+      // Fallback to in-memory for unit tests that don't want to mock DBs
+      this.midTermStore = new MidTermStore(
+        this.config.CAPACITY.midTerm,
+        this.config.TAU[1],
+        this.config.DECAY_RATES[1]
+      );
+      this.longTermStore = new LongTermStore(
+        this.config.CAPACITY.longTerm,
+        this.config.TAU[2],
+        this.config.DECAY_RATES[2]
+      );
+    }
     
     this.replayWorker = new ReplayWorker(
       this.shortTermBuffer,
@@ -83,6 +112,17 @@ export class CascadeMemorySystem {
     
     this.logger = new ExplainabilityLogger();
   }
+
+  async initialize(): Promise<void> {
+    if (this.redisClient) await this.redisClient.connect();
+    if (this.pgClient) await this.pgClient.connect();
+  }
+
+  async shutdown(): Promise<void> {
+    if (this.redisClient) await this.redisClient.disconnect();
+    if (this.pgClient) await this.pgClient.end();
+  }
+
   
   /**
    * Ingest raw event
@@ -105,20 +145,20 @@ export class CascadeMemorySystem {
   /**
    * Retrieve memories
    */
-  retrieve(query: RetrievalQuery): RetrievalResult[] {
+  async retrieve(query: RetrievalQuery): Promise<RetrievalResult[]> {
     const results: RetrievalResult[] = [];
     
     // Retrieve from all layers
     if (query.layer === undefined || query.layer === LayerState.SHORT_TERM) {
-      results.push(...this.shortTermBuffer.search(query));
+      results.push(...(await this.shortTermBuffer.search(query)));
     }
     
     if (query.layer === undefined || query.layer === LayerState.MID_TERM) {
-      results.push(...this.midTermStore.search(query));
+      results.push(...(await this.midTermStore.search(query)));
     }
     
     if (query.layer === undefined || query.layer === LayerState.LONG_TERM) {
-      results.push(...this.longTermStore.search(query));
+      results.push(...(await this.longTermStore.search(query)));
     }
     
     // Merge and sort
@@ -153,12 +193,12 @@ export class CascadeMemorySystem {
   /**
    * Manually trigger forgetting cycle
    */
-  runForgetCycle(): ForgettingStats {
-    const stats = this.forgettingService.executeForgetCycle();
+  async runForgetCycle(): Promise<ForgettingStats> {
+    const stats = await this.forgettingService.executeForgetCycle();
     
     // Log to logger
     this.logger.logForgetting(
-      'system',
+      { id: 'system' } as Event,
       LayerState.SHORT_TERM,
       'low_score' as any,
       `Forget cycle completed. Total pruned: ${stats.totalPruned}`
@@ -172,7 +212,7 @@ export class CascadeMemorySystem {
    */
   async runMaintenanceCycle(): Promise<{ replay: ReplayStats; forgetting: ForgettingStats }> {
     const replay = await this.runReplayCycle();
-    const forgetting = this.runForgetCycle();
+    const forgetting = await this.runForgetCycle();
     
     return { replay, forgetting };
   }
@@ -180,11 +220,20 @@ export class CascadeMemorySystem {
   /**
    * Get system statistics
    */
-  getStats(): SystemStats {
-    const layer0Stats = this.shortTermBuffer.getStats();
-    const layer1Stats = this.midTermStore.getStats();
-    const layer2Stats = this.longTermStore.getExtendedStats();
-    const layer1Associations = this.midTermStore.getAssociationStats();
+  async getStats(): Promise<SystemStats> {
+    const layer0Stats = await this.shortTermBuffer.getStats();
+    const layer1Stats = await this.midTermStore.getStats();
+    
+    // Handle specific store methods if available
+    let layer2Stats: any = await this.longTermStore.getStats();
+    if ('getExtendedStats' in this.longTermStore) {
+        layer2Stats = await (this.longTermStore as any).getExtendedStats();
+    }
+    
+    let layer1Associations: any = { totalAssociations: 0 };
+    if ('getAssociationStats' in this.midTermStore) {
+        layer1Associations = (this.midTermStore as any).getAssociationStats();
+    }
     
     return {
       layer0: {
@@ -202,7 +251,7 @@ export class CascadeMemorySystem {
         size: layer2Stats.size,
         capacity: layer2Stats.capacity,
         utilization: layer2Stats.utilizationRate,
-        schemas: layer2Stats.schemaCount
+        schemas: layer2Stats.schemaCount || 0
       },
       totalEvents: layer0Stats.size + layer1Stats.size + layer2Stats.size,
       lastReplayTime: this.replayWorker.getNextReplayTime()
@@ -226,9 +275,9 @@ export class CascadeMemorySystem {
   /**
    * Export system state
    */
-  exportState() {
+  async exportState() {
     return {
-      stats: this.getStats(),
+      stats: await this.getStats(),
       logSummary: this.getLogSummary(),
       config: this.config
     };
@@ -237,27 +286,28 @@ export class CascadeMemorySystem {
   /**
    * Manually delete event
    */
-  deleteEvent(eventId: string): boolean {
+  async deleteEvent(eventId: string): Promise<boolean> {
     return this.forgettingService.manualDelete(eventId);
   }
   
   /**
    * Clear all data
    */
-  clear(): void {
-    this.shortTermBuffer.clear();
-    this.midTermStore.clear();
-    this.longTermStore.clear();
+  async clear(): Promise<void> {
+    await this.shortTermBuffer.clear();
+    await this.midTermStore.clear();
+    await this.longTermStore.clear();
     this.logger.clearLogs();
   }
   
   /**
    * Get specific event
    */
-  getEvent(eventId: string): Event | undefined {
-    return this.shortTermBuffer.get(eventId) ||
-           this.midTermStore.get(eventId) ||
-           this.longTermStore.get(eventId);
+  async getEvent(eventId: string): Promise<Event | undefined> {
+    let event = await this.shortTermBuffer.get(eventId);
+    if (!event) event = await this.midTermStore.get(eventId);
+    if (!event) event = await this.longTermStore.get(eventId);
+    return event;
   }
   
   /**

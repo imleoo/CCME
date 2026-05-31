@@ -23,9 +23,14 @@ export interface RawEvent {
  */
 export class EventEncoder {
   private vectorDim: number;
+  private minWaitTime: number;
   
-  constructor(vectorDim: number = DEFAULT_CONFIG.VECTOR_DIM) {
+  constructor(
+    vectorDim: number = DEFAULT_CONFIG.VECTOR_DIM,
+    minWaitTime: number = DEFAULT_CONFIG.REPLAY.minWaitTime
+  ) {
     this.vectorDim = vectorDim;
+    this.minWaitTime = minWaitTime;
   }
   
   /**
@@ -63,7 +68,7 @@ export class EventEncoder {
       history: [historyEntry],
       createdAt: timestamp,
       lastAccessedAt: timestamp,
-      promotionEligibleAt: timestamp + DEFAULT_CONFIG.REPLAY.minWaitTime * 1000
+      promotionEligibleAt: timestamp + this.minWaitTime * 1000
     };
     
     return event;

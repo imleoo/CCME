@@ -39,7 +39,7 @@ export class ForgettingService {
   /**
    * Execute complete forgetting cycle
    */
-  executeForgetCycle(): ForgettingStats {
+  async executeForgetCycle(): Promise<ForgettingStats> {
     const stats: ForgettingStats = {
       layer0Pruned: 0,
       layer1Pruned: 0,
@@ -49,13 +49,13 @@ export class ForgettingService {
     };
     
     // 1. Process Layer 0 forgetting
-    stats.layer0Pruned = this.pruneLayer0(stats.reasons);
+    stats.layer0Pruned = await this.pruneLayer0(stats.reasons);
     
     // 2. Process Layer 1 forgetting
-    stats.layer1Pruned = this.pruneLayer1(stats.reasons);
+    stats.layer1Pruned = await this.pruneLayer1(stats.reasons);
     
     // 3. Process Layer 2 forgetting
-    stats.layer2Pruned = this.pruneLayer2(stats.reasons);
+    stats.layer2Pruned = await this.pruneLayer2(stats.reasons);
     
     stats.totalPruned = stats.layer0Pruned + stats.layer1Pruned + stats.layer2Pruned;
     
@@ -68,12 +68,12 @@ export class ForgettingService {
    * - Low score events
    * - Capacity limit
    */
-  private pruneLayer0(reasons: Map<ForgettingReason, number>): number {
+  private async pruneLayer0(reasons: Map<ForgettingReason, number>): Promise<number> {
     let pruned = 0;
     const toRemove: string[] = [];
     
     // 1. Remove expired events
-    const expired = this.shortTermBuffer.getExpiredEvents();
+    const expired = await this.shortTermBuffer.getExpiredEvents();
     for (const event of expired) {
       toRemove.push(event.id);
       this.recordReason(reasons, ForgettingReason.EXPIRED);
@@ -82,7 +82,8 @@ export class ForgettingService {
     
     // 2. Remove low score events
     const lowScoreThreshold = 0.1;
-    const lowScoreEvents = this.shortTermBuffer.getAll().filter(e => {
+    const allEvents = await this.shortTermBuffer.getAll();
+    const lowScoreEvents = allEvents.filter(e => {
       const score = e.scores.layer0Score || e.scores.rawSalience;
       return score < lowScoreThreshold && !toRemove.includes(e.id);
     });
@@ -95,28 +96,33 @@ export class ForgettingService {
     
     // 3. Capacity limit: if still over capacity, remove lowest scoring ones
     const capacity = this.config.CAPACITY.shortTerm;
-    const currentSize = this.shortTermBuffer.size();
+    const currentSize = await this.shortTermBuffer.size();
     const excess = currentSize - toRemove.length - capacity;
     
     if (excess > 0) {
-      const remaining = this.shortTermBuffer.getAll()
-        .filter(e => !toRemove.includes(e.id))
-        .sort((a, b) => {
-          const scoreA = a.scores.layer0Score || a.scores.rawSalience;
-          const scoreB = b.scores.layer0Score || b.scores.rawSalience;
-          return scoreA - scoreB;
-        })
-        .slice(0, excess);
-      
-      for (const event of remaining) {
-        toRemove.push(event.id);
-        this.recordReason(reasons, ForgettingReason.CAPACITY_LIMIT);
-        this.markAsPruned(event, ForgettingReason.CAPACITY_LIMIT);
-      }
+       // Filter out already marked for removal
+       const candidates = allEvents.filter(e => !toRemove.includes(e.id));
+       // Sort by score ascending
+       candidates.sort((a, b) => {
+         const scoreA = a.scores.layer0Score || a.scores.rawSalience;
+         const scoreB = b.scores.layer0Score || b.scores.rawSalience;
+         return scoreA - scoreB;
+       });
+       
+       const toPrune = candidates.slice(0, excess);
+       for (const event of toPrune) {
+         toRemove.push(event.id);
+         this.recordReason(reasons, ForgettingReason.CAPACITY);
+         this.markAsPruned(event, ForgettingReason.CAPACITY);
+       }
     }
     
     // Execute removal
-    pruned = this.shortTermBuffer.removeBatch(toRemove);
+    for (const id of toRemove) {
+      if (await this.shortTermBuffer.remove(id)) {
+        pruned++;
+      }
+    }
     
     return pruned;
   }
@@ -124,12 +130,12 @@ export class ForgettingService {
   /**
    * Prune Layer 1
    */
-  private pruneLayer1(reasons: Map<ForgettingReason, number>): number {
+  private async pruneLayer1(reasons: Map<ForgettingReason, number>): Promise<number> {
     let pruned = 0;
     const toRemove: string[] = [];
     
     // 1. Remove expired events
-    const expired = this.midTermStore.getExpiredEvents();
+    const expired = await this.midTermStore.getExpiredEvents();
     for (const event of expired) {
       toRemove.push(event.id);
       this.recordReason(reasons, ForgettingReason.EXPIRED);
@@ -140,7 +146,9 @@ export class ForgettingService {
     const lowScoreThreshold = 0.2;
     const lowCentralityThreshold = 0.1;
     
-    const lowUtilityEvents = this.midTermStore.getAll().filter(e => {
+    const allEvents = await this.midTermStore.getAll();
+
+    const lowUtilityEvents = allEvents.filter(e => {
       if (toRemove.includes(e.id)) return false;
       
       const score = e.scores.layer1Score || e.scores.layer0Score || e.scores.rawSalience;
@@ -157,11 +165,11 @@ export class ForgettingService {
     
     // 3. Capacity limit
     const capacity = this.config.CAPACITY.midTerm;
-    const currentSize = this.midTermStore.size();
+    const currentSize = await this.midTermStore.size();
     const excess = currentSize - toRemove.length - capacity;
     
     if (excess > 0) {
-      const remaining = this.midTermStore.getAll()
+      const remaining = allEvents
         .filter(e => !toRemove.includes(e.id))
         .sort((a, b) => {
           const scoreA = a.scores.layer1Score || a.scores.layer0Score || a.scores.rawSalience;
@@ -169,78 +177,65 @@ export class ForgettingService {
           const centralityA = this.midTermStore.getCentrality(a.id);
           const centralityB = this.midTermStore.getCentrality(b.id);
           
-          // Combine score and centrality
           return (scoreA + centralityA) - (scoreB + centralityB);
         })
         .slice(0, excess);
       
       for (const event of remaining) {
         toRemove.push(event.id);
-        this.recordReason(reasons, ForgettingReason.CAPACITY_LIMIT);
-        this.markAsPruned(event, ForgettingReason.CAPACITY_LIMIT);
+        this.recordReason(reasons, ForgettingReason.CAPACITY);
+        this.markAsPruned(event, ForgettingReason.CAPACITY);
       }
     }
     
-    pruned = this.midTermStore.removeBatch(toRemove);
+    // Execute removal
+    for (const id of toRemove) {
+      if (await this.midTermStore.remove(id)) {
+        pruned++;
+      }
+    }
     
     return pruned;
   }
   
   /**
    * Prune Layer 2
-   * Long-term layer pruning is more conservative
    */
-  private pruneLayer2(reasons: Map<ForgettingReason, number>): number {
+  private async pruneLayer2(reasons: Map<ForgettingReason, number>): Promise<number> {
     let pruned = 0;
     const toRemove: string[] = [];
     
-    // Only prune Layer 2 in extreme cases
-    // 1. Remove very low score events
-    const veryLowScoreThreshold = 0.1;
+    // Layer 2 has very slow decay, but we can prune based on very low utility
+    // or extreme capacity constraints
     
-    const veryLowScoreEvents = this.longTermStore.getAll().filter(e => {
-      const score = e.scores.layer2Score || 
-                   e.scores.layer1Score || 
-                   e.scores.rawSalience;
-      return score < veryLowScoreThreshold;
+    const lowScoreThreshold = 0.05; // Very low threshold
+    const allEvents = await this.longTermStore.getAll();
+    
+    const lowUtilityEvents = allEvents.filter(e => {
+      const score = e.scores.layer2Score || e.scores.layer1Score || e.scores.rawSalience;
+      return score < lowScoreThreshold;
     });
     
-    for (const event of veryLowScoreEvents) {
+    for (const event of lowUtilityEvents) {
       toRemove.push(event.id);
-      this.recordReason(reasons, ForgettingReason.LOW_SCORE);
-      this.markAsPruned(event, ForgettingReason.LOW_SCORE);
+      this.recordReason(reasons, ForgettingReason.LOW_UTILITY);
+      this.markAsPruned(event, ForgettingReason.LOW_UTILITY);
     }
     
-    // 2. Capacity limit (only when severely over capacity)
-    const capacity = this.config.CAPACITY.longTerm;
-    const currentSize = this.longTermStore.size();
-    const excess = currentSize - toRemove.length - capacity;
-    
-    if (excess > 0) {
-      const remaining = this.longTermStore.getAll()
-        .filter(e => !toRemove.includes(e.id))
-        .sort((a, b) => {
-          const scoreA = a.scores.layer2Score || a.scores.layer1Score || a.scores.rawSalience;
-          const scoreB = b.scores.layer2Score || b.scores.layer1Score || b.scores.rawSalience;
-          return scoreA - scoreB;
-        })
-        .slice(0, excess);
-      
-      for (const event of remaining) {
-        toRemove.push(event.id);
-        this.recordReason(reasons, ForgettingReason.CAPACITY_LIMIT);
-        this.markAsPruned(event, ForgettingReason.CAPACITY_LIMIT);
+    // Execute removal
+    for (const id of toRemove) {
+      if (await this.longTermStore.remove(id)) {
+        pruned++;
       }
     }
-    
-    pruned = this.longTermStore.removeBatch(toRemove);
     
     return pruned;
   }
   
-  /**
-   * Mark event as pruned
-   */
+  private recordReason(reasons: Map<ForgettingReason, number>, reason: ForgettingReason): void {
+    reasons.set(reason, (reasons.get(reason) || 0) + 1);
+  }
+  
   private markAsPruned(event: Event, reason: ForgettingReason): void {
     event.history.push({
       action: 'pruned',
@@ -250,22 +245,12 @@ export class ForgettingService {
   }
   
   /**
-   * Record forgetting reason statistics
+   * Manual delete
    */
-  private recordReason(reasons: Map<ForgettingReason, number>, reason: ForgettingReason): void {
-    const count = reasons.get(reason) || 0;
-    reasons.set(reason, count + 1);
-  }
-  
-  /**
-   * Manually delete event
-   */
-  manualDelete(eventId: string): boolean {
-    // Try to delete from each layer
-    if (this.shortTermBuffer.remove(eventId)) return true;
-    if (this.midTermStore.remove(eventId)) return true;
-    if (this.longTermStore.remove(eventId)) return true;
-    
-    return false;
+  async manualDelete(eventId: string): Promise<boolean> {
+    let deleted = await this.shortTermBuffer.remove(eventId);
+    if (!deleted) deleted = await this.midTermStore.remove(eventId);
+    if (!deleted) deleted = await this.longTermStore.remove(eventId);
+    return deleted;
   }
 }

@@ -50,7 +50,22 @@ export const DEFAULT_CONFIG = {
   VECTOR_DIM: 384,
   
   // Repetition detection window (seconds)
-  REPEAT_WINDOW: 3600
+  REPEAT_WINDOW: 3600,
+
+  // Persistence Configuration
+  PERSISTENCE: {
+    ENABLED: true,
+    REDIS: {
+      url: process.env.REDIS_URL || 'redis://localhost:6379'
+    },
+    POSTGRES: {
+      host: process.env.PG_HOST || 'localhost',
+      port: parseInt(process.env.PG_PORT || '5432'),
+      user: process.env.PG_USER || 'postgres',
+      password: process.env.PG_PASSWORD || 'postgres',
+      database: process.env.PG_DATABASE || 'chronocascade'
+    }
+  }
 };
 
 export type SystemConfig = typeof DEFAULT_CONFIG;

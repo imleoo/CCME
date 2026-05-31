@@ -7,13 +7,13 @@ import { timeDiffInSeconds, now } from '../utils/time';
  * Common interface for storage at each layer
  */
 export interface IMemoryStore {
-  add(event: Event): void;
-  get(id: string): Event | undefined;
-  getAll(): Event[];
-  remove(id: string): boolean;
-  size(): number;
-  clear(): void;
-  search(query: RetrievalQuery): RetrievalResult[];
+  add(event: Event): void | Promise<void>;
+  get(id: string): Event | undefined | Promise<Event | undefined>;
+  getAll(): Event[] | Promise<Event[]>;
+  remove(id: string): boolean | Promise<boolean>;
+  size(): number | Promise<number>;
+  clear(): void | Promise<void>;
+  search(query: RetrievalQuery): RetrievalResult[] | Promise<RetrievalResult[]>;
 }
 
 /**
@@ -34,7 +34,7 @@ export class MemoryStore implements IMemoryStore {
   /**
    * Add event
    */
-  add(event: Event): void {
+  add(event: Event): void | Promise<void> {
     if (this.events.size >= this.capacity && !this.events.has(event.id)) {
       throw new Error(`Layer ${this.layer} capacity exceeded (${this.capacity})`);
     }
@@ -46,7 +46,7 @@ export class MemoryStore implements IMemoryStore {
   /**
    * Get single event
    */
-  get(id: string): Event | undefined {
+  get(id: string): Event | undefined | Promise<Event | undefined> {
     const event = this.events.get(id);
     if (event) {
       event.lastAccessedAt = now();
@@ -57,35 +57,35 @@ export class MemoryStore implements IMemoryStore {
   /**
    * Get all events
    */
-  getAll(): Event[] {
+  getAll(): Event[] | Promise<Event[]> {
     return Array.from(this.events.values());
   }
   
   /**
    * Remove event
    */
-  remove(id: string): boolean {
+  remove(id: string): boolean | Promise<boolean> {
     return this.events.delete(id);
   }
   
   /**
    * Get current size
    */
-  size(): number {
+  size(): number | Promise<number> {
     return this.events.size;
   }
   
   /**
    * Clear storage
    */
-  clear(): void {
+  clear(): void | Promise<void> {
     this.events.clear();
   }
   
   /**
    * Search events
    */
-  search(query: RetrievalQuery): RetrievalResult[] {
+  search(query: RetrievalQuery): RetrievalResult[] | Promise<RetrievalResult[]> {
     let candidates = Array.from(this.events.values());
     
     // Filter: layer
@@ -181,16 +181,17 @@ export class MemoryStore implements IMemoryStore {
   /**
    * Get statistics
    */
-  getStats() {
-    const events = this.getAll();
-    const scores = events.map(e => this.getCurrentScore(e));
+  async getStats() {
+    const events = await this.getAll();
+    const size = await this.size();
+    const scores = events.map((e: Event) => this.getCurrentScore(e));
     
     return {
       layer: this.layer,
-      size: this.size(),
+      size: size,
       capacity: this.capacity,
-      utilizationRate: this.size() / this.capacity,
-      avgScore: scores.length > 0 ? scores.reduce((a, b) => a + b, 0) / scores.length : 0,
+      utilizationRate: size / this.capacity,
+      avgScore: scores.length > 0 ? scores.reduce((a: number, b: number) => a + b, 0) / scores.length : 0,
       maxScore: scores.length > 0 ? Math.max(...scores) : 0,
       minScore: scores.length > 0 ? Math.min(...scores) : 0
     };

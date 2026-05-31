@@ -95,19 +95,19 @@ export class ReplayWorker {
   /**
    * Apply decay to all layers
    */
-  private applyDecayToAllLayers(): void {
+  private async applyDecayToAllLayers(): Promise<void> {
     const currentTime = now();
     
-    this.shortTermBuffer.applyDecay(currentTime);
-    this.midTermStore.applyDecay(currentTime);
-    this.longTermStore.applyDecay(currentTime);
+    await this.shortTermBuffer.applyDecay(currentTime);
+    await this.midTermStore.applyDecay(currentTime);
+    await this.longTermStore.applyDecay(currentTime);
   }
-  
+
   /**
    * Process Layer 0 -> Layer 1 promotions
    */
   private async processLayer0Promotions(): Promise<number> {
-    const candidates = this.shortTermBuffer.getAll();
+    const candidates = await this.shortTermBuffer.getAll();
     
     const promotionCandidates = this.cascadeGates.evaluateCandidates(
       candidates,
@@ -128,23 +128,24 @@ export class ReplayWorker {
         );
         
         // Remove from Layer 0 and add to Layer 1
-        this.shortTermBuffer.remove(event.id);
-        this.midTermStore.add(event);
+        await this.shortTermBuffer.remove(event.id);
+        await this.midTermStore.add(event);
         
         promoted++;
       } catch (error) {
         // Silently ignore promotion errors
+        console.error('Failed to promote from L0 to L1:', error);
       }
     }
     
     return promoted;
   }
-  
+
   /**
    * Process Layer 1 -> Layer 2 promotions
    */
   private async processLayer1Promotions(): Promise<number> {
-    const candidates = this.midTermStore.getAll();
+    const candidates = await this.midTermStore.getAll();
     
     const promotionCandidates = this.cascadeGates.evaluateCandidates(
       candidates,
@@ -165,18 +166,19 @@ export class ReplayWorker {
         );
         
         // Remove from Layer 1 and add to Layer 2
-        this.midTermStore.remove(event.id);
-        this.longTermStore.add(event);
+        await this.midTermStore.remove(event.id);
+        await this.longTermStore.add(event);
         
         promoted++;
       } catch (error) {
         // Silently ignore promotion errors
+        console.error('Failed to promote from L1 to L2:', error);
       }
     }
     
     return promoted;
   }
-  
+
   /**
    * Execute replay consolidation
    * Select important memories for "replay", enhance their scores
@@ -189,7 +191,7 @@ export class ReplayWorker {
     
     // Replay from Layer 0
     const layer0Events = this.selectReplayTargets(
-      this.shortTermBuffer.getAll(),
+      await this.shortTermBuffer.getAll(),
       Math.floor(batchSize / 2)
     );
     
@@ -197,13 +199,13 @@ export class ReplayWorker {
       this.replayEvent(event, boost);
       replayCount++;
     }
-    
+
     // Replay from Layer 1
     const layer1Events = this.selectReplayTargets(
-      this.midTermStore.getAll(),
+      await this.midTermStore.getAll(),
       Math.floor(batchSize / 2)
     );
-    
+
     for (const event of layer1Events) {
       this.replayEvent(event, boost);
       replayCount++;
