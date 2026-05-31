@@ -4,3 +4,10 @@ coverage/
 *.log
 .DS_Store
 .env
+
+# Go
+bin/
+memory/
+*.db
+*.db-shm
+*.db-wal
