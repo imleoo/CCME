@@ -22,10 +22,11 @@ ChronoCascade Memory Engine 是一个基于生物学记忆机制（"分子计时
 
 ### 技术栈
 
-- **语言**：Go 1.22+
+- **语言**：Go 1.26+
 - **存储底层**：Markdown 文件 (YAML frontmatter + body) + SQLite (`modernc.org/sqlite`，纯 Go 实现，无 cgo)
 - **依赖**：`google/uuid`、`gopkg.in/yaml.v3`
 - **测试**：Go 标准 `testing` 包
+- **本地任务入口**：`Makefile`（`make help` 列出全部目标）
 
 ### 持久化布局
 
@@ -104,36 +105,53 @@ ForgettingService ─ 过期 / 低分 / 容量上限 / 低效用 清理
 
 ### 环境要求
 
-- Go 1.22 或更高版本
+- Go 1.26 或更高版本（本项目用到了 `new(expr)` 语法）
+- 可选：`sqlite3` CLI（用于 `make inspect-sql` 查看索引表行数）
 
-### 运行 demo
+### 使用 Makefile（推荐）
+
+仓库根目录提供了 `Makefile` 作为本地任务入口。直接 `make help` 看全部目标：
 
 ```bash
-go run ./cmd/ccme -reset -dir ./memory
+make help            # 列出所有可用目标
+make demo            # 重置存储 + 跑完整 demo（最常用）
+make run             # 在已有存储上跑 demo（不重置）
+make test            # 跑全部单元测试
+make build           # 编译到 bin/ccme
+make inspect         # 列出 memory/ 下的所有文件
+make inspect-sql     # 显示 SQLite 各表行数
+make peek            # 打印第一份 l0/*.md 文件（手动核查 frontmatter）
+make check           # fmt + vet + test 一键跑
+make clean-store     # 清空 memory/（安全：拒绝清空根级别路径）
 ```
 
-输出示例：
+存储路径可通过 `DEMO_DIR` 覆盖：
+
+```bash
+DEMO_DIR=/tmp/ccme-test make demo
+make inspect DEMO_DIR=/tmp/ccme-test
+```
+
+### 直接调用 Go 工具链
+
+```bash
+go run ./cmd/ccme -reset -dir ./memory   # 等价于 make demo
+go test ./...                            # 等价于 make test
+go build -o bin/ccme ./cmd/ccme          # 等价于 make build
+```
+
+### demo 输出示例
 
 ```
 === ChronoCascade Memory Engine (Go) ===
-[ingest] id=... layer=short-term salience=0.780
-[maintenance] L0->L1=0 L1->L2=0 replays=5 pruned=0
-[retrieve tag=AI] hits=2
-[retrieve ctx=study] hits=2
-[stats]
-{ "layer0": { "size": 5, ... }, ... }
-```
-
-### 运行测试
-
-```bash
-go test ./...
-```
-
-### 编译二进制
-
-```bash
-go build -o bin/ccme ./cmd/ccme
+[ingest] id=... layer=short-term salience=0.780 user=user_alice session=session_001
+[ingest-async] id=...
+[maintenance] L0->L1=0 L1->L2=0 replays=6 pruned=0
+[retrieve user=user_alice tag=AI] hits=2
+[profile] Alice style=concise patterns=1
+[summaries] count=1 first="..."
+[chat] recent=2
+[stats] { "layer0": { "size": 6, ... }, ... }
 ```
 
 ## 5. 编程接口

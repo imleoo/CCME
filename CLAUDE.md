@@ -17,22 +17,35 @@ All public API methods accept `context.Context`. `*core.CascadeMemorySystem` imp
 
 ## Development Commands
 
+A `Makefile` at the repo root is the canonical entry point. `make help` prints the full list.
+
 ```bash
-# Build CLI demo
-go build -o bin/ccme ./cmd/ccme
+make demo              # reset ./memory and run the end-to-end demo
+make run               # run the demo against an existing store
+make test              # go test ./... -count=1
+make test-v            # verbose tests
+make cover             # tests + coverage.out + summary
+make build             # bin/ccme
+make inspect           # list files under DEMO_DIR (default ./memory)
+make inspect-sql       # row counts for every SQLite table
+make peek              # head -40 of the first l0/*.md file
+make check             # fmt + vet + test
+make clean             # rm -rf bin/ coverage.out
+make clean-store       # rm -rf $(DEMO_DIR) — refuses '/' and ''
+make clean-all         # clean + clean-store
+```
 
-# Run the demo (-reset wipes the store first)
+Override the store path via `DEMO_DIR=/tmp/foo make demo`.
+
+For direct toolchain access without the Makefile:
+
+```bash
 go run ./cmd/ccme -reset -dir ./memory
-
-# Run all tests
-go test ./...
-
-# Run a single test
 go test ./internal/core -run TestRetrieveByContext -v
-
-# Update / verify module graph
 go mod tidy
 ```
+
+Go 1.26 is required because `cmd/ccme/main.go` uses the new `new(expr)` syntax to build `*float64` reward pointers inline.
 
 ## Architecture
 

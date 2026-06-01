@@ -33,14 +33,14 @@ type LogEntry struct {
 
 // StatsSummary aggregates counts across all log entries.
 type StatsSummary struct {
-	TotalPromotions     int
-	TotalForgetting     int
-	TotalReplays        int
-	PromotionsByReason  map[types.PromotionReason]int
-	ForgettingByReason  map[types.ForgettingReason]int
-	AvgPromotionScore   float64
-	Layer0ToLayer1      int
-	Layer1ToLayer2      int
+	TotalPromotions    int
+	TotalForgetting    int
+	TotalReplays       int
+	PromotionsByReason map[types.PromotionReason]int
+	ForgettingByReason map[types.ForgettingReason]int
+	AvgPromotionScore  float64
+	Layer0ToLayer1     int
+	Layer1ToLayer2     int
 }
 
 // ExplainabilityLogger keeps the last N audit entries in memory.

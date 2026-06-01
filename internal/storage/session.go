@@ -20,8 +20,9 @@ import (
 // SessionStore persists SessionContext + SessionSummary documents.
 //
 // Layout:
-//   sessions/<user_id>/<session_id>.md      -- session context
-//   summaries/<user_id>/<session_id>.md     -- rolling summary
+//
+//	sessions/<user_id>/<session_id>.md      -- session context
+//	summaries/<user_id>/<session_id>.md     -- rolling summary
 type SessionStore struct {
 	baseDir string
 	idx     *Index

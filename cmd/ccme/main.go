@@ -64,7 +64,7 @@ func runDemo(ctx context.Context, sys *core.CascadeMemorySystem) {
 		SessionID: sessionID,
 		AgentName: "ui_tracker",
 		Tags:      []string{"preference", "ui"},
-		Reward:    ptr(0.8),
+		Reward:    new(0.8),
 	})
 	must(err)
 	fmt.Printf("[ingest] id=%s layer=%s salience=%.3f user=%s session=%s\n",
@@ -94,7 +94,7 @@ func runDemo(ctx context.Context, sys *core.CascadeMemorySystem) {
 			UserID:    userID,
 			SessionID: sessionID,
 			Tags:      []string{"food", "preference"},
-			Reward:    ptr(0.9),
+			Reward:    new(0.9),
 		})
 		must(err)
 	}
@@ -211,8 +211,6 @@ func dumpStats(s core.SystemStats) {
 	fmt.Println("[stats]")
 	fmt.Println(string(out))
 }
-
-func ptr[T any](v T) *T { return &v }
 
 func must(err error) {
 	if err != nil {

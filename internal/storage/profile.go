@@ -20,8 +20,9 @@ import (
 // ProfileStore persists UserProfile objects as Markdown + SQLite envelopes.
 //
 // Layout:
-//   profiles/<user_id>.md   -- canonical human-readable file
-//   user_profiles row       -- JSON payload + timestamps for fast lookup
+//
+//	profiles/<user_id>.md   -- canonical human-readable file
+//	user_profiles row       -- JSON payload + timestamps for fast lookup
 type ProfileStore struct {
 	baseDir string
 	idx     *Index

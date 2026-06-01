@@ -19,9 +19,9 @@ type RawEvent = types.RawEvent
 
 // EventEncoder turns RawEvents into fully-populated Events.
 type EventEncoder struct {
-	vectorDim    int
+	vectorDim     int
 	minWaitMillis int64
-	clock        util.Clock
+	clock         util.Clock
 }
 
 // NewEventEncoder constructs an encoder bound to the given config.
@@ -30,9 +30,9 @@ func NewEventEncoder(cfg config.Config, clock util.Clock) *EventEncoder {
 		clock = util.SystemClock{}
 	}
 	return &EventEncoder{
-		vectorDim:    cfg.VectorDim,
+		vectorDim:     cfg.VectorDim,
 		minWaitMillis: cfg.Replay.MinWaitTime.Milliseconds(),
-		clock:        clock,
+		clock:         clock,
 	}
 }
 

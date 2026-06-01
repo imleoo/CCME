@@ -70,17 +70,17 @@ type Scores struct {
 
 // Event is the basic unit of memory in the cascade.
 type Event struct {
-	ID                   string         `yaml:"id" json:"id"`
-	Vector               []float64      `yaml:"vector" json:"vector"`
-	Metadata             EventMetadata  `yaml:"metadata" json:"metadata"`
-	LayerState           LayerState     `yaml:"layerState" json:"layerState"`
-	Scores               Scores         `yaml:"scores" json:"scores"`
-	History              []HistoryEntry `yaml:"history" json:"history"`
-	CreatedAt            int64          `yaml:"createdAt" json:"createdAt"`
-	LastAccessedAt       int64          `yaml:"lastAccessedAt" json:"lastAccessedAt"`
-	PromotionEligibleAt  int64          `yaml:"promotionEligibleAt,omitempty" json:"promotionEligibleAt,omitempty"`
-	Content              any            `yaml:"-" json:"-"`     // markdown body, not stored in frontmatter
-	ContentRaw           string         `yaml:"-" json:"-"`     // original raw content (string form) for round-trip
+	ID                  string         `yaml:"id" json:"id"`
+	Vector              []float64      `yaml:"vector" json:"vector"`
+	Metadata            EventMetadata  `yaml:"metadata" json:"metadata"`
+	LayerState          LayerState     `yaml:"layerState" json:"layerState"`
+	Scores              Scores         `yaml:"scores" json:"scores"`
+	History             []HistoryEntry `yaml:"history" json:"history"`
+	CreatedAt           int64          `yaml:"createdAt" json:"createdAt"`
+	LastAccessedAt      int64          `yaml:"lastAccessedAt" json:"lastAccessedAt"`
+	PromotionEligibleAt int64          `yaml:"promotionEligibleAt,omitempty" json:"promotionEligibleAt,omitempty"`
+	Content             any            `yaml:"-" json:"-"` // markdown body, not stored in frontmatter
+	ContentRaw          string         `yaml:"-" json:"-"` // original raw content (string form) for round-trip
 }
 
 // PromotionReason describes why an event moved up the cascade.

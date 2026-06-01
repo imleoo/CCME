@@ -27,22 +27,22 @@ type CapacityConfig struct {
 
 // StorageConfig points at the on-disk locations used by the persistence layer.
 type StorageConfig struct {
-	BaseDir       string // root for markdown files
-	SQLitePath    string // sqlite index path
-	UseSqliteVec  bool   // reserved: enable sqlite-vec KNN (requires cgo build)
+	BaseDir      string // root for markdown files
+	SQLitePath   string // sqlite index path
+	UseSqliteVec bool   // reserved: enable sqlite-vec KNN (requires cgo build)
 }
 
 // Config bundles all knobs of the system.
 type Config struct {
-	Tau               [3]time.Duration // per-layer lifespan
-	PromoThreshold    [2]float64       // L0→L1, L1→L2 promotion thresholds
-	DecayRates        [3]float64       // per-second decay rates
-	SalienceWeights   SalienceWeights
-	Replay            ReplayConfig
-	Capacity          CapacityConfig
-	VectorDim         int
-	RepeatWindow      time.Duration // repetition-detection window
-	Storage           StorageConfig
+	Tau             [3]time.Duration // per-layer lifespan
+	PromoThreshold  [2]float64       // L0→L1, L1→L2 promotion thresholds
+	DecayRates      [3]float64       // per-second decay rates
+	SalienceWeights SalienceWeights
+	Replay          ReplayConfig
+	Capacity        CapacityConfig
+	VectorDim       int
+	RepeatWindow    time.Duration // repetition-detection window
+	Storage         StorageConfig
 }
 
 // Default returns the bio-inspired defaults that match the original TS engine.

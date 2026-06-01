@@ -16,19 +16,20 @@ import (
 
 // Index is the SQLite-backed index over markdown event files.
 // Schema layout:
-//   events(id, layer, context_id, user_id, session_id, agent_name, source,
-//          ts, created_at, last_accessed_at, promotion_eligible_at,
-//          score, reward, repetition_count, vector BLOB, file_path)
-//   tags(event_id, tag)
-//   associations(a_id, b_id)              -- mid-term layer graph
-//   schemas(id, summary, vector, importance, created_at, last_updated_at, file_path)
-//   schema_sources(schema_id, event_id)
-//   user_profiles(user_id, payload, file_path, created_at, updated_at)
-//   session_contexts(user_id, session_id, payload, file_path, updated_at)
-//   session_summaries(id, user_id, session_id, turn_range_start, turn_range_end,
-//                     summary, file_path, created_at)
-//   chat_messages(id, user_id, session_id, turn_index, role, agent_name,
-//                 content, intent_snapshot, profile_snapshot, review_passed, created_at)
+//
+//	events(id, layer, context_id, user_id, session_id, agent_name, source,
+//	       ts, created_at, last_accessed_at, promotion_eligible_at,
+//	       score, reward, repetition_count, vector BLOB, file_path)
+//	tags(event_id, tag)
+//	associations(a_id, b_id)              -- mid-term layer graph
+//	schemas(id, summary, vector, importance, created_at, last_updated_at, file_path)
+//	schema_sources(schema_id, event_id)
+//	user_profiles(user_id, payload, file_path, created_at, updated_at)
+//	session_contexts(user_id, session_id, payload, file_path, updated_at)
+//	session_summaries(id, user_id, session_id, turn_range_start, turn_range_end,
+//	                  summary, file_path, created_at)
+//	chat_messages(id, user_id, session_id, turn_index, role, agent_name,
+//	              content, intent_snapshot, profile_snapshot, review_passed, created_at)
 type Index struct {
 	db *sql.DB
 }
