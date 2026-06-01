@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"fmt"
 	"math"
 
@@ -41,12 +42,12 @@ func NewMidTermStore(cfg config.Config, idx *Index, clock util.Clock) *MidTermSt
 func (m *MidTermStore) Layer() types.LayerState { return types.MidTerm }
 
 // Add persists the event and rebuilds its associations with similar peers.
-func (m *MidTermStore) Add(e *types.Event) error {
-	size, err := m.idx.CountByLayer(types.MidTerm)
+func (m *MidTermStore) Add(ctx context.Context, e *types.Event) error {
+	size, err := m.idx.CountByLayer(ctx, types.MidTerm)
 	if err != nil {
 		return err
 	}
-	existing, err := m.idx.GetByID(e.ID)
+	existing, err := m.idx.GetByID(ctx, e.ID)
 	if err != nil {
 		return err
 	}
@@ -58,19 +59,24 @@ func (m *MidTermStore) Add(e *types.Event) error {
 	if err := WriteEventFile(m.baseDir, e); err != nil {
 		return err
 	}
-	if err := m.idx.UpsertEvent(e, EventPath(m.baseDir, types.MidTerm, e.ID)); err != nil {
+	if err := m.idx.UpsertEvent(ctx, e, EventPath(m.baseDir, types.MidTerm, e.ID)); err != nil {
 		return err
 	}
-	return m.buildAssociations(e)
+	return m.buildAssociations(ctx, e)
 }
 
-func (m *MidTermStore) buildAssociations(e *types.Event) error {
-	rows, err := m.idx.ListByLayer(types.MidTerm)
+func (m *MidTermStore) buildAssociations(ctx context.Context, e *types.Event) error {
+	rows, err := m.idx.ListByLayer(ctx, types.MidTerm)
 	if err != nil {
 		return err
 	}
 	for _, r := range rows {
 		if r.ID == e.ID {
+			continue
+		}
+		// Associations are scoped to a single user — never cross-link memories
+		// belonging to different users. (Empty UserID treated as a shared bucket.)
+		if e.Metadata.UserID != r.UserID {
 			continue
 		}
 		associate := false
@@ -84,7 +90,7 @@ func (m *MidTermStore) buildAssociations(e *types.Event) error {
 			associate = true
 		}
 		if associate {
-			if err := m.idx.AddAssociation(e.ID, r.ID); err != nil {
+			if err := m.idx.AddAssociation(ctx, e.ID, r.ID); err != nil {
 				return err
 			}
 		}
@@ -107,12 +113,12 @@ func countSharedTags(a, b []string) int {
 }
 
 // Centrality is degree-centrality normalised by N-1.
-func (m *MidTermStore) Centrality(id string) (float64, error) {
-	deg, err := m.idx.NeighborCount(id)
+func (m *MidTermStore) Centrality(ctx context.Context, id string) (float64, error) {
+	deg, err := m.idx.NeighborCount(ctx, id)
 	if err != nil {
 		return 0, err
 	}
-	total, err := m.idx.CountByLayer(types.MidTerm)
+	total, err := m.idx.CountByLayer(ctx, types.MidTerm)
 	if err != nil || total <= 1 {
 		return 0, err
 	}
@@ -121,23 +127,23 @@ func (m *MidTermStore) Centrality(id string) (float64, error) {
 
 // Reindex persists changes to an event without rebuilding associations.
 // Used by the replay worker after score mutations.
-func (m *MidTermStore) Reindex(e *types.Event) error {
+func (m *MidTermStore) Reindex(ctx context.Context, e *types.Event) error {
 	if err := WriteEventFile(m.baseDir, e); err != nil {
 		return err
 	}
-	return m.idx.UpsertEvent(e, EventPath(m.baseDir, e.LayerState, e.ID))
+	return m.idx.UpsertEvent(ctx, e, EventPath(m.baseDir, e.LayerState, e.ID))
 }
 
-func (m *MidTermStore) Get(id string) (*types.Event, error) {
-	r, err := m.idx.GetByID(id)
+func (m *MidTermStore) Get(ctx context.Context, id string) (*types.Event, error) {
+	r, err := m.idx.GetByID(ctx, id)
 	if err != nil || r == nil || r.Layer != types.MidTerm {
 		return nil, err
 	}
 	return hydrateEvent(m.baseDir, r)
 }
 
-func (m *MidTermStore) GetAll() ([]*types.Event, error) {
-	rows, err := m.idx.ListByLayer(types.MidTerm)
+func (m *MidTermStore) GetAll(ctx context.Context) ([]*types.Event, error) {
+	rows, err := m.idx.ListByLayer(ctx, types.MidTerm)
 	if err != nil {
 		return nil, err
 	}
@@ -152,42 +158,48 @@ func (m *MidTermStore) GetAll() ([]*types.Event, error) {
 	return out, nil
 }
 
-func (m *MidTermStore) Remove(id string) (bool, error) {
-	r, err := m.idx.GetByID(id)
+func (m *MidTermStore) Remove(ctx context.Context, id string) (bool, error) {
+	r, err := m.idx.GetByID(ctx, id)
 	if err != nil || r == nil || r.Layer != types.MidTerm {
 		return false, err
 	}
-	if err := m.idx.RemoveAssociations(id); err != nil {
+	if err := m.idx.RemoveAssociations(ctx, id); err != nil {
 		return false, err
 	}
 	if err := RemoveEventFile(m.baseDir, types.MidTerm, id); err != nil {
 		return false, err
 	}
-	return m.idx.DeleteEvent(id)
+	return m.idx.DeleteEvent(ctx, id)
 }
 
-func (m *MidTermStore) Size() (int, error) {
-	return m.idx.CountByLayer(types.MidTerm)
+func (m *MidTermStore) Size(ctx context.Context) (int, error) {
+	return m.idx.CountByLayer(ctx, types.MidTerm)
 }
 
-func (m *MidTermStore) Clear() error {
-	events, err := m.GetAll()
+func (m *MidTermStore) Clear(ctx context.Context) error {
+	events, err := m.GetAll(ctx)
 	if err != nil {
 		return err
 	}
 	for _, e := range events {
-		_ = m.idx.RemoveAssociations(e.ID)
+		_ = m.idx.RemoveAssociations(ctx, e.ID)
 		_ = RemoveEventFile(m.baseDir, types.MidTerm, e.ID)
-		if _, err := m.idx.DeleteEvent(e.ID); err != nil {
+		if _, err := m.idx.DeleteEvent(ctx, e.ID); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (m *MidTermStore) Search(q types.RetrievalQuery) ([]types.RetrievalResult, error) {
+func (m *MidTermStore) Search(ctx context.Context, q types.RetrievalQuery) ([]types.RetrievalResult, error) {
 	layer := types.MidTerm
-	rows, err := m.idx.Search(&layer, q.ContextID, q.Tags)
+	rows, err := m.idx.Search(ctx, SearchFilters{
+		Layer:     &layer,
+		ContextID: q.ContextID,
+		UserID:    q.UserID,
+		SessionID: q.SessionID,
+		Tags:      q.Tags,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -205,15 +217,15 @@ func (m *MidTermStore) Search(q types.RetrievalQuery) ([]types.RetrievalResult, 
 
 // ApplyDecay is a Layer-1 decay with structural support: highly connected
 // events lose less score than isolated ones.
-func (m *MidTermStore) ApplyDecay(nowMillis int64) error {
-	events, err := m.GetAll()
+func (m *MidTermStore) ApplyDecay(ctx context.Context, nowMillis int64) error {
+	events, err := m.GetAll(ctx)
 	if err != nil {
 		return err
 	}
 	for _, e := range events {
 		age := float64(nowMillis-e.LastAccessedAt) / 1000.0
 		factor := math.Exp(-m.decayRate * age)
-		centrality, err := m.Centrality(e.ID)
+		centrality, err := m.Centrality(ctx, e.ID)
 		if err != nil {
 			return err
 		}
@@ -235,15 +247,15 @@ func (m *MidTermStore) ApplyDecay(nowMillis int64) error {
 		if err := WriteEventFile(m.baseDir, e); err != nil {
 			return err
 		}
-		if err := m.idx.UpsertEvent(e, EventPath(m.baseDir, types.MidTerm, e.ID)); err != nil {
+		if err := m.idx.UpsertEvent(ctx, e, EventPath(m.baseDir, types.MidTerm, e.ID)); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (m *MidTermStore) GetExpiredEvents() ([]*types.Event, error) {
-	events, err := m.GetAll()
+func (m *MidTermStore) GetExpiredEvents(ctx context.Context) ([]*types.Event, error) {
+	events, err := m.GetAll(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -257,8 +269,8 @@ func (m *MidTermStore) GetExpiredEvents() ([]*types.Event, error) {
 	return out, nil
 }
 
-func (m *MidTermStore) GetStats() (types.LayerStats, error) {
-	events, err := m.GetAll()
+func (m *MidTermStore) GetStats(ctx context.Context) (types.LayerStats, error) {
+	events, err := m.GetAll(ctx)
 	if err != nil {
 		return types.LayerStats{}, err
 	}
@@ -266,6 +278,6 @@ func (m *MidTermStore) GetStats() (types.LayerStats, error) {
 }
 
 // TotalAssociations exposes the global edge count for system stats.
-func (m *MidTermStore) TotalAssociations() (int, error) {
-	return m.idx.TotalAssociations()
+func (m *MidTermStore) TotalAssociations(ctx context.Context) (int, error) {
+	return m.idx.TotalAssociations(ctx)
 }

@@ -1,6 +1,8 @@
 package core
 
 import (
+	"context"
+	"errors"
 	"sort"
 
 	"chronocascade/internal/config"
@@ -21,34 +23,43 @@ type SystemStats struct {
 }
 
 // CascadeMemorySystem is the public facade that wires all components together.
+// It implements types.Manager.
 type CascadeMemorySystem struct {
-	cfg     config.Config
-	clock   util.Clock
-	idx     *storage.Index
-	short   *storage.ShortTermBuffer
-	mid     *storage.MidTermStore
-	long    *storage.LongTermStore
-	encoder *EventEncoder
-	gates   *CascadeGates
-	replay  *ReplayWorker
-	forget  *ForgettingService
-	logger  *ExplainabilityLogger
+	cfg      config.Config
+	clock    util.Clock
+	idx      *storage.Index
+	short    *storage.ShortTermBuffer
+	mid      *storage.MidTermStore
+	long     *storage.LongTermStore
+	profiles *storage.ProfileStore
+	sessions *storage.SessionStore
+	chatLog  *storage.ChatLog
+	encoder  *EventEncoder
+	gates    *CascadeGates
+	replay   *ReplayWorker
+	forget   *ForgettingService
+	logger   *ExplainabilityLogger
 }
 
+var _ types.Manager = (*CascadeMemorySystem)(nil)
+
 // New constructs the system and opens the SQLite index plus markdown layout.
-func New(cfg config.Config) (*CascadeMemorySystem, error) {
-	return NewWithClock(cfg, util.SystemClock{})
+func New(ctx context.Context, cfg config.Config) (*CascadeMemorySystem, error) {
+	return NewWithClock(ctx, cfg, util.SystemClock{})
 }
 
 // NewWithClock is the testable variant accepting an injectable clock.
-func NewWithClock(cfg config.Config, clock util.Clock) (*CascadeMemorySystem, error) {
-	idx, err := storage.OpenIndex(cfg.Storage.SQLitePath)
+func NewWithClock(ctx context.Context, cfg config.Config, clock util.Clock) (*CascadeMemorySystem, error) {
+	idx, err := storage.OpenIndex(ctx, cfg.Storage.SQLitePath)
 	if err != nil {
 		return nil, err
 	}
 	short := storage.NewShortTermBuffer(cfg, idx, clock)
 	mid := storage.NewMidTermStore(cfg, idx, clock)
 	long := storage.NewLongTermStore(cfg, idx, clock)
+	profiles := storage.NewProfileStore(cfg.Storage.BaseDir, idx, clock)
+	sessions := storage.NewSessionStore(cfg.Storage.BaseDir, idx, clock)
+	chatLog := storage.NewChatLog(idx, clock)
 	gates := NewCascadeGates(cfg, clock)
 	replay := NewReplayWorker(cfg, clock, short, mid, long, gates)
 	forget := NewForgettingService(cfg, short, mid, long)
@@ -57,6 +68,7 @@ func NewWithClock(cfg config.Config, clock util.Clock) (*CascadeMemorySystem, er
 	return &CascadeMemorySystem{
 		cfg: cfg, clock: clock, idx: idx,
 		short: short, mid: mid, long: long,
+		profiles: profiles, sessions: sessions, chatLog: chatLog,
 		encoder: encoder, gates: gates,
 		replay: replay, forget: forget, logger: logger,
 	}, nil
@@ -65,20 +77,22 @@ func NewWithClock(cfg config.Config, clock util.Clock) (*CascadeMemorySystem, er
 // Close releases the SQLite handle. Markdown files stay on disk.
 func (s *CascadeMemorySystem) Close() error { return s.idx.Close() }
 
+// ── Cascade-side API ─────────────────────────────────────────────────────────
+
 // Ingest accepts a single raw event and stores it in Layer 0.
-func (s *CascadeMemorySystem) Ingest(raw RawEvent) (*types.Event, error) {
+func (s *CascadeMemorySystem) Ingest(ctx context.Context, raw types.RawEvent) (*types.Event, error) {
 	e := s.encoder.Encode(raw)
-	if err := s.short.Add(e); err != nil {
+	if err := s.short.Add(ctx, e); err != nil {
 		return nil, err
 	}
 	return e, nil
 }
 
 // IngestBatch is the batch version of Ingest.
-func (s *CascadeMemorySystem) IngestBatch(raws []RawEvent) ([]*types.Event, error) {
+func (s *CascadeMemorySystem) IngestBatch(ctx context.Context, raws []types.RawEvent) ([]*types.Event, error) {
 	out := make([]*types.Event, 0, len(raws))
 	for _, r := range raws {
-		e, err := s.Ingest(r)
+		e, err := s.Ingest(ctx, r)
 		if err != nil {
 			return out, err
 		}
@@ -87,8 +101,32 @@ func (s *CascadeMemorySystem) IngestBatch(raws []RawEvent) ([]*types.Event, erro
 	return out, nil
 }
 
+// IngestAsync writes the event in a background goroutine. The result is
+// delivered on the returned channel exactly once (then closed).
+//
+// We snapshot ctx.Done() at call time; the background goroutine runs with a
+// background context so the caller cancelling does not abort an already
+// half-written ingest. If you need cancellable async writes, gate the work
+// yourself before calling IngestAsync.
+func (s *CascadeMemorySystem) IngestAsync(ctx context.Context, raw types.RawEvent) <-chan types.IngestResult {
+	out := make(chan types.IngestResult, 1)
+	go func() {
+		defer close(out)
+		// Use a detached context so a cancelled parent ctx doesn't corrupt
+		// half-written state. The cascade is local — no remote calls to abort.
+		bg := context.Background()
+		e, err := s.Ingest(bg, raw)
+		select {
+		case out <- types.IngestResult{Event: e, Err: err}:
+		case <-ctx.Done():
+			// Caller stopped listening; drop the result.
+		}
+	}()
+	return out
+}
+
 // Retrieve queries all (or one specific) layer and returns the merged top-K results.
-func (s *CascadeMemorySystem) Retrieve(q types.RetrievalQuery) ([]types.RetrievalResult, error) {
+func (s *CascadeMemorySystem) Retrieve(ctx context.Context, q types.RetrievalQuery) ([]types.RetrievalResult, error) {
 	layers := []storage.Store{s.short, s.mid, s.long}
 	if q.Layer != nil {
 		switch *q.Layer {
@@ -102,7 +140,7 @@ func (s *CascadeMemorySystem) Retrieve(q types.RetrievalQuery) ([]types.Retrieva
 	}
 	var merged []types.RetrievalResult
 	for _, layer := range layers {
-		r, err := layer.Search(q)
+		r, err := layer.Search(ctx, q)
 		if err != nil {
 			return nil, err
 		}
@@ -124,10 +162,9 @@ func (s *CascadeMemorySystem) Retrieve(q types.RetrievalQuery) ([]types.Retrieva
 }
 
 // RunReplayCycle is the manual trigger for the consolidation worker.
-func (s *CascadeMemorySystem) RunReplayCycle() (ReplayStats, error) {
-	stats, err := s.replay.ExecuteReplayCycle()
+func (s *CascadeMemorySystem) RunReplayCycle(ctx context.Context) (ReplayStats, error) {
+	stats, err := s.replay.ExecuteReplayCycle(ctx)
 	if err == nil {
-		// Surface a single audit log so the explainability summary tracks cycles.
 		s.logger.LogReplay(&types.Event{ID: "system", LayerState: types.ShortTerm}, 0,
 			"replay cycle: L0→L1="+itoa(stats.Layer0Promotions)+", L1→L2="+itoa(stats.Layer1Promotions))
 	}
@@ -135,8 +172,8 @@ func (s *CascadeMemorySystem) RunReplayCycle() (ReplayStats, error) {
 }
 
 // RunForgetCycle is the manual trigger for pruning.
-func (s *CascadeMemorySystem) RunForgetCycle() (ForgettingStats, error) {
-	stats, err := s.forget.ExecuteForgetCycle()
+func (s *CascadeMemorySystem) RunForgetCycle(ctx context.Context) (ForgettingStats, error) {
+	stats, err := s.forget.ExecuteForgetCycle(ctx)
 	if err == nil {
 		s.logger.LogForgetting("system", types.ShortTerm, types.ForgetLowScore,
 			"forget cycle pruned "+itoa(stats.TotalPruned))
@@ -145,34 +182,34 @@ func (s *CascadeMemorySystem) RunForgetCycle() (ForgettingStats, error) {
 }
 
 // RunMaintenanceCycle is replay+forget back-to-back.
-func (s *CascadeMemorySystem) RunMaintenanceCycle() (ReplayStats, ForgettingStats, error) {
-	r, err := s.RunReplayCycle()
+func (s *CascadeMemorySystem) RunMaintenanceCycle(ctx context.Context) (ReplayStats, ForgettingStats, error) {
+	r, err := s.RunReplayCycle(ctx)
 	if err != nil {
 		return r, ForgettingStats{}, err
 	}
-	f, err := s.RunForgetCycle()
+	f, err := s.RunForgetCycle(ctx)
 	return r, f, err
 }
 
 // GetStats returns a fresh system-wide snapshot.
-func (s *CascadeMemorySystem) GetStats() (SystemStats, error) {
-	l0, err := s.short.GetStats()
+func (s *CascadeMemorySystem) GetStats(ctx context.Context) (SystemStats, error) {
+	l0, err := s.short.GetStats(ctx)
 	if err != nil {
 		return SystemStats{}, err
 	}
-	l1, err := s.mid.GetStats()
+	l1, err := s.mid.GetStats(ctx)
 	if err != nil {
 		return SystemStats{}, err
 	}
-	l2, err := s.long.GetStats()
+	l2, err := s.long.GetStats(ctx)
 	if err != nil {
 		return SystemStats{}, err
 	}
-	edges, err := s.mid.TotalAssociations()
+	edges, err := s.mid.TotalAssociations(ctx)
 	if err != nil {
 		return SystemStats{}, err
 	}
-	schemas, err := s.long.SchemaCount()
+	schemas, err := s.long.SchemaCount(ctx)
 	if err != nil {
 		return SystemStats{}, err
 	}
@@ -196,40 +233,40 @@ func (s *CascadeMemorySystem) GetEventHistory(id string) []LogEntry {
 }
 
 // DeleteEvent removes a single event by id from whichever layer holds it.
-func (s *CascadeMemorySystem) DeleteEvent(id string) (bool, error) {
-	return s.forget.ManualDelete(id)
+func (s *CascadeMemorySystem) DeleteEvent(ctx context.Context, id string) (bool, error) {
+	return s.forget.ManualDelete(ctx, id)
 }
 
 // GetEvent fetches an event by id across all layers.
-func (s *CascadeMemorySystem) GetEvent(id string) (*types.Event, error) {
-	if e, err := s.short.Get(id); err != nil || e != nil {
+func (s *CascadeMemorySystem) GetEvent(ctx context.Context, id string) (*types.Event, error) {
+	if e, err := s.short.Get(ctx, id); err != nil || e != nil {
 		return e, err
 	}
-	if e, err := s.mid.Get(id); err != nil || e != nil {
+	if e, err := s.mid.Get(ctx, id); err != nil || e != nil {
 		return e, err
 	}
-	return s.long.Get(id)
+	return s.long.Get(ctx, id)
 }
 
 // Clear wipes every layer, every association, every schema, every markdown file.
-func (s *CascadeMemorySystem) Clear() error {
-	if err := s.short.Clear(); err != nil {
+func (s *CascadeMemorySystem) Clear(ctx context.Context) error {
+	if err := s.short.Clear(ctx); err != nil {
 		return err
 	}
-	if err := s.mid.Clear(); err != nil {
+	if err := s.mid.Clear(ctx); err != nil {
 		return err
 	}
-	if err := s.long.Clear(); err != nil {
+	if err := s.long.Clear(ctx); err != nil {
 		return err
 	}
 	s.logger.ClearLogs()
-	return s.idx.ClearAll()
+	return s.idx.ClearAll(ctx)
 }
 
 // ConsolidateLongTermMemory runs schema clustering on Layer 2 and returns the
 // number of new schemas created.
-func (s *CascadeMemorySystem) ConsolidateLongTermMemory() (int, error) {
-	schemas, err := s.long.AutoConsolidate(3, 0.8)
+func (s *CascadeMemorySystem) ConsolidateLongTermMemory(ctx context.Context) (int, error) {
+	schemas, err := s.long.AutoConsolidate(ctx, 3, 0.8)
 	if err != nil {
 		return 0, err
 	}
@@ -239,8 +276,52 @@ func (s *CascadeMemorySystem) ConsolidateLongTermMemory() (int, error) {
 	return len(schemas), nil
 }
 
+// ── Session-side API ─────────────────────────────────────────────────────────
+
+// ReadSessionContext loads the running state of a chat session.
+func (s *CascadeMemorySystem) ReadSessionContext(ctx context.Context, userID, sessionID string) (*types.SessionContext, error) {
+	return s.sessions.ReadContext(ctx, userID, sessionID)
+}
+
+// WriteSessionContext persists a session context document.
+func (s *CascadeMemorySystem) WriteSessionContext(ctx context.Context, sc *types.SessionContext) error {
+	return s.sessions.WriteContext(ctx, sc)
+}
+
+// ReadUserProfile loads the structured profile for a user.
+func (s *CascadeMemorySystem) ReadUserProfile(ctx context.Context, userID string) (*types.UserProfile, error) {
+	return s.profiles.Read(ctx, userID)
+}
+
+// WriteUserProfile persists a structured profile.
+func (s *CascadeMemorySystem) WriteUserProfile(ctx context.Context, p *types.UserProfile) error {
+	if p == nil {
+		return errors.New("WriteUserProfile: nil profile")
+	}
+	return s.profiles.Write(ctx, p)
+}
+
+// UpsertSessionSummary replaces the rolling summary for a session.
+func (s *CascadeMemorySystem) UpsertSessionSummary(ctx context.Context, sum *types.SessionSummary) error {
+	return s.sessions.UpsertSummary(ctx, sum)
+}
+
+// ListSessionSummaries returns rolling summaries ordered by turn range.
+func (s *CascadeMemorySystem) ListSessionSummaries(ctx context.Context, userID, sessionID string) ([]*types.SessionSummary, error) {
+	return s.sessions.ListSummaries(ctx, userID, sessionID)
+}
+
+// WriteChatMessage appends one chat message to the audit log.
+func (s *CascadeMemorySystem) WriteChatMessage(ctx context.Context, msg *types.ChatMessage) error {
+	return s.chatLog.Write(ctx, msg)
+}
+
+// ReadRecentChatMessages returns up to `limit` recent messages (most recent first).
+func (s *CascadeMemorySystem) ReadRecentChatMessages(ctx context.Context, userID, sessionID string, limit int) ([]*types.ChatMessage, error) {
+	return s.chatLog.Recent(ctx, userID, sessionID, limit)
+}
+
 func itoa(n int) string {
-	// tiny inlined int→string to keep system.go free of fmt imports
 	if n == 0 {
 		return "0"
 	}

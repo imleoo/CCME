@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -42,12 +43,12 @@ func NewLongTermStore(cfg config.Config, idx *Index, clock util.Clock) *LongTerm
 
 func (l *LongTermStore) Layer() types.LayerState { return types.LongTerm }
 
-func (l *LongTermStore) Add(e *types.Event) error {
-	size, err := l.idx.CountByLayer(types.LongTerm)
+func (l *LongTermStore) Add(ctx context.Context, e *types.Event) error {
+	size, err := l.idx.CountByLayer(ctx, types.LongTerm)
 	if err != nil {
 		return err
 	}
-	existing, err := l.idx.GetByID(e.ID)
+	existing, err := l.idx.GetByID(ctx, e.ID)
 	if err != nil {
 		return err
 	}
@@ -59,19 +60,19 @@ func (l *LongTermStore) Add(e *types.Event) error {
 	if err := WriteEventFile(l.baseDir, e); err != nil {
 		return err
 	}
-	return l.idx.UpsertEvent(e, EventPath(l.baseDir, types.LongTerm, e.ID))
+	return l.idx.UpsertEvent(ctx, e, EventPath(l.baseDir, types.LongTerm, e.ID))
 }
 
-func (l *LongTermStore) Get(id string) (*types.Event, error) {
-	r, err := l.idx.GetByID(id)
+func (l *LongTermStore) Get(ctx context.Context, id string) (*types.Event, error) {
+	r, err := l.idx.GetByID(ctx, id)
 	if err != nil || r == nil || r.Layer != types.LongTerm {
 		return nil, err
 	}
 	return hydrateEvent(l.baseDir, r)
 }
 
-func (l *LongTermStore) GetAll() ([]*types.Event, error) {
-	rows, err := l.idx.ListByLayer(types.LongTerm)
+func (l *LongTermStore) GetAll(ctx context.Context) ([]*types.Event, error) {
+	rows, err := l.idx.ListByLayer(ctx, types.LongTerm)
 	if err != nil {
 		return nil, err
 	}
@@ -86,38 +87,44 @@ func (l *LongTermStore) GetAll() ([]*types.Event, error) {
 	return out, nil
 }
 
-func (l *LongTermStore) Remove(id string) (bool, error) {
-	r, err := l.idx.GetByID(id)
+func (l *LongTermStore) Remove(ctx context.Context, id string) (bool, error) {
+	r, err := l.idx.GetByID(ctx, id)
 	if err != nil || r == nil || r.Layer != types.LongTerm {
 		return false, err
 	}
 	if err := RemoveEventFile(l.baseDir, types.LongTerm, id); err != nil {
 		return false, err
 	}
-	return l.idx.DeleteEvent(id)
+	return l.idx.DeleteEvent(ctx, id)
 }
 
-func (l *LongTermStore) Size() (int, error) {
-	return l.idx.CountByLayer(types.LongTerm)
+func (l *LongTermStore) Size(ctx context.Context) (int, error) {
+	return l.idx.CountByLayer(ctx, types.LongTerm)
 }
 
-func (l *LongTermStore) Clear() error {
-	events, err := l.GetAll()
+func (l *LongTermStore) Clear(ctx context.Context) error {
+	events, err := l.GetAll(ctx)
 	if err != nil {
 		return err
 	}
 	for _, e := range events {
 		_ = RemoveEventFile(l.baseDir, types.LongTerm, e.ID)
-		if _, err := l.idx.DeleteEvent(e.ID); err != nil {
+		if _, err := l.idx.DeleteEvent(ctx, e.ID); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (l *LongTermStore) Search(q types.RetrievalQuery) ([]types.RetrievalResult, error) {
+func (l *LongTermStore) Search(ctx context.Context, q types.RetrievalQuery) ([]types.RetrievalResult, error) {
 	layer := types.LongTerm
-	rows, err := l.idx.Search(&layer, q.ContextID, q.Tags)
+	rows, err := l.idx.Search(ctx, SearchFilters{
+		Layer:     &layer,
+		ContextID: q.ContextID,
+		UserID:    q.UserID,
+		SessionID: q.SessionID,
+		Tags:      q.Tags,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -133,8 +140,8 @@ func (l *LongTermStore) Search(q types.RetrievalQuery) ([]types.RetrievalResult,
 	return rankAndTopK(events, q), nil
 }
 
-func (l *LongTermStore) ApplyDecay(nowMillis int64) error {
-	events, err := l.GetAll()
+func (l *LongTermStore) ApplyDecay(ctx context.Context, nowMillis int64) error {
+	events, err := l.GetAll(ctx)
 	if err != nil {
 		return err
 	}
@@ -157,15 +164,15 @@ func (l *LongTermStore) ApplyDecay(nowMillis int64) error {
 		if err := WriteEventFile(l.baseDir, e); err != nil {
 			return err
 		}
-		if err := l.idx.UpsertEvent(e, EventPath(l.baseDir, types.LongTerm, e.ID)); err != nil {
+		if err := l.idx.UpsertEvent(ctx, e, EventPath(l.baseDir, types.LongTerm, e.ID)); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (l *LongTermStore) GetExpiredEvents() ([]*types.Event, error) {
-	events, err := l.GetAll()
+func (l *LongTermStore) GetExpiredEvents(ctx context.Context) ([]*types.Event, error) {
+	events, err := l.GetAll(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -179,8 +186,8 @@ func (l *LongTermStore) GetExpiredEvents() ([]*types.Event, error) {
 	return out, nil
 }
 
-func (l *LongTermStore) GetStats() (types.LayerStats, error) {
-	events, err := l.GetAll()
+func (l *LongTermStore) GetStats(ctx context.Context) (types.LayerStats, error) {
+	events, err := l.GetAll(ctx)
 	if err != nil {
 		return types.LayerStats{}, err
 	}
@@ -201,9 +208,8 @@ type SchemaEntry struct {
 }
 
 // AutoConsolidate clusters similar events and merges each cluster into a Schema.
-// Returns the newly created schemas.
-func (l *LongTermStore) AutoConsolidate(minGroupSize int, similarityThreshold float64) ([]*SchemaEntry, error) {
-	events, err := l.GetAll()
+func (l *LongTermStore) AutoConsolidate(ctx context.Context, minGroupSize int, similarityThreshold float64) ([]*SchemaEntry, error) {
+	events, err := l.GetAll(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -216,7 +222,7 @@ func (l *LongTermStore) AutoConsolidate(minGroupSize int, similarityThreshold fl
 		if len(g) < minGroupSize {
 			continue
 		}
-		schema, err := l.consolidate(g)
+		schema, err := l.consolidate(ctx, g)
 		if err != nil {
 			return nil, err
 		}
@@ -248,14 +254,14 @@ func clusterSimilar(events []*types.Event, threshold float64) [][]*types.Event {
 	return groups
 }
 
-func (l *LongTermStore) consolidate(events []*types.Event) (*SchemaEntry, error) {
+func (l *LongTermStore) consolidate(ctx context.Context, events []*types.Event) (*SchemaEntry, error) {
 	if len(events) == 0 {
 		return nil, fmt.Errorf("cannot consolidate empty list")
 	}
 	dim := len(events[0].Vector)
 	avg := make([]float64, dim)
 	for _, e := range events {
-		for i := 0; i < dim; i++ {
+		for i := range dim {
 			avg[i] += e.Vector[i]
 		}
 	}
@@ -288,12 +294,11 @@ func (l *LongTermStore) consolidate(events []*types.Event) (*SchemaEntry, error)
 		FilePath:         l.schemaPath(schema.ID),
 		ConsolidatedFrom: schema.ConsolidatedFrom,
 	}
-	if err := l.idx.UpsertSchema(row); err != nil {
+	if err := l.idx.UpsertSchema(ctx, row); err != nil {
 		return nil, err
 	}
-	// Source events have been folded into the schema - drop them.
 	for _, e := range events {
-		if _, err := l.Remove(e.ID); err != nil {
+		if _, err := l.Remove(ctx, e.ID); err != nil {
 			return nil, err
 		}
 	}
@@ -362,17 +367,17 @@ func schemaImportance(events []*types.Event) float64 {
 	if len(events) == 0 {
 		return 0
 	}
-	max := events[0].CurrentScore()
+	maxS := events[0].CurrentScore()
 	sum := 0.0
 	for _, e := range events {
 		s := e.CurrentScore()
 		sum += s
-		if s > max {
-			max = s
+		if s > maxS {
+			maxS = s
 		}
 	}
 	avg := sum / float64(len(events))
-	return 0.6*max + 0.4*avg
+	return 0.6*maxS + 0.4*avg
 }
 
 func collectIDs(events []*types.Event) []string {
@@ -390,4 +395,6 @@ func newSchemaID(nowMillis int64) string {
 }
 
 // SchemaCount exposes the persisted schema count for system stats.
-func (l *LongTermStore) SchemaCount() (int, error) { return l.idx.CountSchemas() }
+func (l *LongTermStore) SchemaCount(ctx context.Context) (int, error) {
+	return l.idx.CountSchemas(ctx)
+}

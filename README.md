@@ -17,6 +17,8 @@ ChronoCascade Memory Engine 是一个基于生物学记忆机制（"分子计时
 - **智能晋升**：基于显著度 (Salience)、重复度 (Repetition)、奖励 (Reward) 自动晋升关键记忆。
 - **动态遗忘**：根据生命周期、得分、容量自动清理低价值记忆。
 - **可解释性**：记录每一次晋升、重放、遗忘、巩固的原因与得分。
+- **会话+画像维度**：每条事件可归属 `(UserID, SessionID)`，并通过 `UserProfile`、`SessionContext`、`SessionSummary`、`ChatMessage` 四类侧面文档承载对话状态、用户画像、滚动摘要、审计日志。
+- **`context.Context` 全程**：所有公开 API 接受 ctx，支持取消和超时；提供 `IngestAsync` 后台落库。
 
 ### 技术栈
 
@@ -29,14 +31,19 @@ ChronoCascade Memory Engine 是一个基于生物学记忆机制（"分子计时
 
 ```
 memory/
-├── index.db              # SQLite 索引：events、tags、associations、schemas
-├── l0/<uuid>.md          # Layer 0 短期记忆
-├── l1/<uuid>.md          # Layer 1 中期记忆
-├── l2/<uuid>.md          # Layer 2 长期记忆
-└── schemas/<id>.md       # Layer 2 巩固后的 Schema
+├── index.db                              # SQLite 索引
+├── l0/<uuid>.md                          # Layer 0 短期记忆事件
+├── l1/<uuid>.md                          # Layer 1 中期记忆事件
+├── l2/<uuid>.md                          # Layer 2 长期记忆事件
+├── schemas/<id>.md                       # Layer 2 巩固后的 Schema
+├── profiles/<user_id>.md                 # UserProfile（结构化用户画像）
+├── sessions/<user_id>/<session_id>.md    # SessionContext（会话状态 + 对话历史）
+└── summaries/<user_id>/<session_id>.md   # SessionSummary（滚动摘要，单文档替换）
 ```
 
-每个 `.md` 文件以 YAML frontmatter 保存结构化字段（id、scores、history、vector 等），文件正文保留事件原始内容，便于人类直接查阅或被其他工具索引（Obsidian 等）。
+`index.db` 内表：`events / tags / associations / schemas / schema_sources / user_profiles / session_contexts / session_summaries / chat_messages`。
+
+每个 `.md` 文件以 YAML frontmatter 保存结构化字段（id、scores、history、vector 等），文件正文保留事件原始内容，便于人类直接查阅或被其他工具索引（Obsidian 等）。`chat_messages` 作为高频 append-only 审计日志只入 SQLite，不落 MD。
 
 ## 2. 业务流程
 
@@ -131,46 +138,107 @@ go build -o bin/ccme ./cmd/ccme
 
 ## 5. 编程接口
 
+### 5.1 Cascade 事件层
+
 ```go
 import (
+    "context"
     "chronocascade/internal/config"
     "chronocascade/internal/core"
     "chronocascade/internal/types"
 )
 
+ctx := context.Background()
 cfg := config.Default()
 cfg.Storage.BaseDir = "./memory"
 cfg.Storage.SQLitePath = "./memory/index.db"
 
-sys, err := core.New(cfg)
+sys, err := core.New(ctx, cfg)
 if err != nil { panic(err) }
 defer sys.Close()
 
-// 写入记忆
+// 写入记忆（带 user / session 归属）
 reward := 0.8
-e, _ := sys.Ingest(core.RawEvent{
+e, _ := sys.Ingest(ctx, types.RawEvent{
     Content:   "User prefers dark mode",
     Source:    "user_settings",
     ContextID: "user_123",
+    UserID:    "alice",
+    SessionID: "sess_1",
     Tags:      []string{"preference", "ui"},
     Reward:    &reward,
 })
 
-// 维护周期（衰减 + 晋升 + 重放 + 遗忘）
-replay, forget, _ := sys.RunMaintenanceCycle()
+// 异步写入
+ch := sys.IngestAsync(ctx, types.RawEvent{Content: "...", UserID: "alice"})
+result := <-ch
+_ = result.Event
+
+// 维护周期
+replay, forget, _ := sys.RunMaintenanceCycle(ctx)
 _ = replay; _ = forget
 
-// 检索
-results, _ := sys.Retrieve(types.RetrievalQuery{
-    Tags: []string{"preference"},
-    TopK: 5,
+// 用户隔离检索
+results, _ := sys.Retrieve(ctx, types.RetrievalQuery{
+    UserID: "alice",
+    Tags:   []string{"preference"},
+    TopK:   5,
 })
 for _, r := range results {
     println(r.Event.ID, r.Event.LayerState.String())
 }
 
-// 删除
-_, _ = sys.DeleteEvent(e.ID)
+_, _ = sys.DeleteEvent(ctx, e.ID)
+```
+
+### 5.2 会话状态 / 用户画像 / 摘要 / 审计
+
+```go
+// 会话上下文（短期对话状态）
+_ = sys.WriteSessionContext(ctx, &types.SessionContext{
+    UserID: "alice", SessionID: "sess_1",
+    LastAgent: "ui_tracker", TurnCount: 6,
+    History: []types.Message{
+        {Role: "user", Content: "switch to dark mode"},
+        {Role: "assistant", Content: "Done."},
+    },
+})
+
+// 结构化用户画像（中期持久）
+_ = sys.WriteUserProfile(ctx, &types.UserProfile{
+    UserID: "alice", DisplayName: "Alice",
+    CommunicationStyle: "concise",
+    Patterns: []types.ProfilePattern{
+        {ID: "p1", Name: "dark mode preference", Confidence: 0.9},
+    },
+    Preferences: &types.ProfilePreferences{Tone: "warm"},
+    ActivePlan:  &types.ProfileActivePlan{Goal: "...", Status: "in_progress"},
+})
+
+// 滚动摘要（替换式 upsert）
+_ = sys.UpsertSessionSummary(ctx, &types.SessionSummary{
+    UserID: "alice", SessionID: "sess_1",
+    TurnRangeStart: 1, TurnRangeEnd: 6,
+    Summary: "User reaffirmed dark mode + vegetarian preferences",
+})
+
+// 审计日志（不参与召回）
+_ = sys.WriteChatMessage(ctx, &types.ChatMessage{
+    ID: uuid.NewString(), UserID: "alice", SessionID: "sess_1",
+    TurnIndex: 1, Role: "user", Content: "switch to dark mode",
+})
+recent, _ := sys.ReadRecentChatMessages(ctx, "alice", "sess_1", 20)
+_ = recent
+```
+
+### 5.3 Manager 接口
+
+`*core.CascadeMemorySystem` 实现了 `types.Manager`，按此接口编程便于替换 mock：
+
+```go
+var mgr types.Manager = sys
+profile, _ := mgr.ReadUserProfile(ctx, "alice")
+_ = profile
 ```
 
 ## 6. 核心算法
@@ -183,6 +251,8 @@ _, _ = sys.DeleteEvent(e.ID)
 | 检索 | SQLite filter (layer/context/tag) + 内存 cosine 相似度 + topK |
 | 重复检测 | L0 内归一化向量点积 ≥ 0.85 且时间窗 ≤ `RepeatWindow` |
 | Schema 巩固 | L2 内向量聚类 (阈值 0.8) + 聚类规模 ≥ 3 |
+| 用户隔离 | 检索/关联/重复检测均按 UserID 范围执行（空 UserID = 共享） |
+| 滚动摘要 | `UpsertSessionSummary` 删除该 session 所有旧摘要后插入新摘要 |
 
 ## 7. 向量检索说明
 

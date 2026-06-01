@@ -13,15 +13,9 @@ import (
 	"chronocascade/internal/util"
 )
 
-// RawEvent is the input shape ingest() accepts.
-type RawEvent struct {
-	Content   any
-	Source    string
-	ContextID string
-	Reward    *float64
-	Tags      []string
-	Vector    []float64 // optional pre-computed embedding
-}
+// RawEvent is re-exported from the types package so callers depending only on
+// core have a stable name. The canonical definition lives in types.RawEvent.
+type RawEvent = types.RawEvent
 
 // EventEncoder turns RawEvents into fully-populated Events.
 type EventEncoder struct {
@@ -60,6 +54,9 @@ func (e *EventEncoder) Encode(raw RawEvent) *types.Event {
 			TS:              now,
 			Source:          raw.Source,
 			ContextID:       raw.ContextID,
+			UserID:          raw.UserID,
+			SessionID:       raw.SessionID,
+			AgentName:       raw.AgentName,
 			Reward:          raw.Reward,
 			Tags:            tags,
 			RepetitionCount: 0,

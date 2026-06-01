@@ -25,10 +25,16 @@ func (l LayerState) String() string {
 }
 
 // EventMetadata carries the descriptive context of an event.
+//
+// UserID/SessionID isolate memories belonging to different users or chat
+// sessions; they are optional — empty strings mean "global / not attributed".
 type EventMetadata struct {
 	TS              int64    `yaml:"ts" json:"ts"`
 	Source          string   `yaml:"source" json:"source"`
 	ContextID       string   `yaml:"contextId" json:"contextId"`
+	UserID          string   `yaml:"userId,omitempty" json:"userId,omitempty"`
+	SessionID       string   `yaml:"sessionId,omitempty" json:"sessionId,omitempty"`
+	AgentName       string   `yaml:"agentName,omitempty" json:"agentName,omitempty"`
 	Reward          *float64 `yaml:"reward,omitempty" json:"reward,omitempty"`
 	Tags            []string `yaml:"tags" json:"tags"`
 	RepetitionCount int      `yaml:"repetitionCount" json:"repetitionCount"`
@@ -104,6 +110,8 @@ const (
 type RetrievalQuery struct {
 	Vector    []float64
 	ContextID string
+	UserID    string
+	SessionID string
 	Tags      []string
 	MinScore  *float64
 	Layer     *LayerState

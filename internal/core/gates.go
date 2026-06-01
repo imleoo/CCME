@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"fmt"
 	"math"
 
@@ -70,7 +71,7 @@ func (g *CascadeGates) ShouldPromoteToLayer1(e *types.Event) PromotionDecision {
 
 // ShouldPromoteToLayer2 evaluates a Layer-1 event for promotion.
 // midTerm is required so we can look up the event's graph centrality.
-func (g *CascadeGates) ShouldPromoteToLayer2(e *types.Event, midTerm *storage.MidTermStore) (PromotionDecision, error) {
+func (g *CascadeGates) ShouldPromoteToLayer2(ctx context.Context, e *types.Event, midTerm *storage.MidTermStore) (PromotionDecision, error) {
 	ageSec := float64(g.clock.NowMillis()-e.CreatedAt) / 1000.0
 	minWait := g.cfg.Replay.MinWaitTime.Seconds() * 2
 	if ageSec < minWait {
@@ -83,7 +84,7 @@ func (g *CascadeGates) ShouldPromoteToLayer2(e *types.Event, midTerm *storage.Mi
 	case e.Scores.Layer0Score != nil:
 		layer1Score = *e.Scores.Layer0Score
 	}
-	centrality, err := midTerm.Centrality(e.ID)
+	centrality, err := midTerm.Centrality(ctx, e.ID)
 	if err != nil {
 		return PromotionDecision{}, err
 	}

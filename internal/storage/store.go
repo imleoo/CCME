@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"errors"
 	"sort"
 
@@ -15,16 +16,16 @@ var ErrCapacityExceeded = errors.New("layer capacity exceeded")
 // Store is the unified interface every layer implements.
 type Store interface {
 	Layer() types.LayerState
-	Add(e *types.Event) error
-	Get(id string) (*types.Event, error)
-	GetAll() ([]*types.Event, error)
-	Remove(id string) (bool, error)
-	Size() (int, error)
-	Clear() error
-	Search(q types.RetrievalQuery) ([]types.RetrievalResult, error)
-	ApplyDecay(nowMillis int64) error
-	GetExpiredEvents() ([]*types.Event, error)
-	GetStats() (types.LayerStats, error)
+	Add(ctx context.Context, e *types.Event) error
+	Get(ctx context.Context, id string) (*types.Event, error)
+	GetAll(ctx context.Context) ([]*types.Event, error)
+	Remove(ctx context.Context, id string) (bool, error)
+	Size(ctx context.Context) (int, error)
+	Clear(ctx context.Context) error
+	Search(ctx context.Context, q types.RetrievalQuery) ([]types.RetrievalResult, error)
+	ApplyDecay(ctx context.Context, nowMillis int64) error
+	GetExpiredEvents(ctx context.Context) ([]*types.Event, error)
+	GetStats(ctx context.Context) (types.LayerStats, error)
 }
 
 // hydrateEvent reads the markdown file pointed to by a row.
@@ -33,8 +34,17 @@ func hydrateEvent(baseDir string, r *EventRow) (*types.Event, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Trust the DB for hot fields (score/last_accessed) so concurrent writers stay consistent.
+	// Trust the DB for hot fields so concurrent writers stay consistent.
 	e.LastAccessedAt = r.LastAccessedAt
+	if e.Metadata.UserID == "" {
+		e.Metadata.UserID = r.UserID
+	}
+	if e.Metadata.SessionID == "" {
+		e.Metadata.SessionID = r.SessionID
+	}
+	if e.Metadata.AgentName == "" {
+		e.Metadata.AgentName = r.AgentName
+	}
 	return e, nil
 }
 
@@ -102,19 +112,19 @@ func computeLayerStats(layer types.LayerState, capacity int, events []*types.Eve
 	if len(events) == 0 {
 		return stats
 	}
-	min, max, sum := events[0].CurrentScore(), events[0].CurrentScore(), 0.0
+	minS, maxS, sum := events[0].CurrentScore(), events[0].CurrentScore(), 0.0
 	for _, e := range events {
 		s := e.CurrentScore()
 		sum += s
-		if s < min {
-			min = s
+		if s < minS {
+			minS = s
 		}
-		if s > max {
-			max = s
+		if s > maxS {
+			maxS = s
 		}
 	}
 	stats.AvgScore = sum / float64(len(events))
-	stats.MinScore = min
-	stats.MaxScore = max
+	stats.MinScore = minS
+	stats.MaxScore = maxS
 	return stats
 }

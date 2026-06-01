@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"sort"
 
 	"chronocascade/internal/config"
@@ -33,22 +34,22 @@ func NewForgettingService(cfg config.Config,
 }
 
 // ExecuteForgetCycle prunes expired/low-utility entries across all layers.
-func (f *ForgettingService) ExecuteForgetCycle() (ForgettingStats, error) {
+func (f *ForgettingService) ExecuteForgetCycle(ctx context.Context) (ForgettingStats, error) {
 	stats := ForgettingStats{Reasons: map[types.ForgettingReason]int{}}
 
-	n, err := f.pruneLayer0(stats.Reasons)
+	n, err := f.pruneLayer0(ctx, stats.Reasons)
 	if err != nil {
 		return stats, err
 	}
 	stats.Layer0Pruned = n
 
-	n, err = f.pruneLayer1(stats.Reasons)
+	n, err = f.pruneLayer1(ctx, stats.Reasons)
 	if err != nil {
 		return stats, err
 	}
 	stats.Layer1Pruned = n
 
-	n, err = f.pruneLayer2(stats.Reasons)
+	n, err = f.pruneLayer2(ctx, stats.Reasons)
 	if err != nil {
 		return stats, err
 	}
@@ -58,8 +59,12 @@ func (f *ForgettingService) ExecuteForgetCycle() (ForgettingStats, error) {
 	return stats, nil
 }
 
-func (f *ForgettingService) pruneLayer0(reasons map[types.ForgettingReason]int) (int, error) {
-	expired, err := f.short.GetExpiredEvents()
+// removeFn is the per-layer Remove function bound to ctx so applyRemovals can
+// call it without each caller manually closing over ctx.
+type removeFn func(id string) (bool, error)
+
+func (f *ForgettingService) pruneLayer0(ctx context.Context, reasons map[types.ForgettingReason]int) (int, error) {
+	expired, err := f.short.GetExpiredEvents(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -67,7 +72,7 @@ func (f *ForgettingService) pruneLayer0(reasons map[types.ForgettingReason]int) 
 	for _, e := range expired {
 		toRemove[e.ID] = types.ForgetExpired
 	}
-	all, err := f.short.GetAll()
+	all, err := f.short.GetAll(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -81,7 +86,7 @@ func (f *ForgettingService) pruneLayer0(reasons map[types.ForgettingReason]int) 
 		}
 	}
 	capacity := f.cfg.Capacity.ShortTerm
-	size, err := f.short.Size()
+	size, err := f.short.Size(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -100,11 +105,11 @@ func (f *ForgettingService) pruneLayer0(reasons map[types.ForgettingReason]int) 
 			toRemove[candidates[i].ID] = types.ForgetCapacityLimit
 		}
 	}
-	return f.applyRemovals(f.short.Remove, toRemove, reasons)
+	return f.applyRemovals(func(id string) (bool, error) { return f.short.Remove(ctx, id) }, toRemove, reasons)
 }
 
-func (f *ForgettingService) pruneLayer1(reasons map[types.ForgettingReason]int) (int, error) {
-	expired, err := f.mid.GetExpiredEvents()
+func (f *ForgettingService) pruneLayer1(ctx context.Context, reasons map[types.ForgettingReason]int) (int, error) {
+	expired, err := f.mid.GetExpiredEvents(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -112,7 +117,7 @@ func (f *ForgettingService) pruneLayer1(reasons map[types.ForgettingReason]int) 
 	for _, e := range expired {
 		toRemove[e.ID] = types.ForgetExpired
 	}
-	all, err := f.mid.GetAll()
+	all, err := f.mid.GetAll(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -124,7 +129,7 @@ func (f *ForgettingService) pruneLayer1(reasons map[types.ForgettingReason]int) 
 		if _, dup := toRemove[e.ID]; dup {
 			continue
 		}
-		c, err := f.mid.Centrality(e.ID)
+		c, err := f.mid.Centrality(ctx, e.ID)
 		if err != nil {
 			return 0, err
 		}
@@ -133,7 +138,7 @@ func (f *ForgettingService) pruneLayer1(reasons map[types.ForgettingReason]int) 
 		}
 	}
 	capacity := f.cfg.Capacity.MidTerm
-	size, err := f.mid.Size()
+	size, err := f.mid.Size(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -148,7 +153,7 @@ func (f *ForgettingService) pruneLayer1(reasons map[types.ForgettingReason]int) 
 			if _, dup := toRemove[e.ID]; dup {
 				continue
 			}
-			c, err := f.mid.Centrality(e.ID)
+			c, err := f.mid.Centrality(ctx, e.ID)
 			if err != nil {
 				return 0, err
 			}
@@ -159,11 +164,11 @@ func (f *ForgettingService) pruneLayer1(reasons map[types.ForgettingReason]int) 
 			toRemove[cands[i].e.ID] = types.ForgetCapacityLimit
 		}
 	}
-	return f.applyRemovals(f.mid.Remove, toRemove, reasons)
+	return f.applyRemovals(func(id string) (bool, error) { return f.mid.Remove(ctx, id) }, toRemove, reasons)
 }
 
-func (f *ForgettingService) pruneLayer2(reasons map[types.ForgettingReason]int) (int, error) {
-	all, err := f.long.GetAll()
+func (f *ForgettingService) pruneLayer2(ctx context.Context, reasons map[types.ForgettingReason]int) (int, error) {
+	all, err := f.long.GetAll(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -174,11 +179,11 @@ func (f *ForgettingService) pruneLayer2(reasons map[types.ForgettingReason]int) 
 			toRemove[e.ID] = types.ForgetLowUtility
 		}
 	}
-	return f.applyRemovals(f.long.Remove, toRemove, reasons)
+	return f.applyRemovals(func(id string) (bool, error) { return f.long.Remove(ctx, id) }, toRemove, reasons)
 }
 
 func (f *ForgettingService) applyRemovals(
-	remove func(id string) (bool, error),
+	remove removeFn,
 	plan map[string]types.ForgettingReason,
 	reasons map[types.ForgettingReason]int,
 ) (int, error) {
@@ -197,12 +202,12 @@ func (f *ForgettingService) applyRemovals(
 }
 
 // ManualDelete tries each layer in order and removes the first match.
-func (f *ForgettingService) ManualDelete(id string) (bool, error) {
-	if ok, err := f.short.Remove(id); err != nil || ok {
+func (f *ForgettingService) ManualDelete(ctx context.Context, id string) (bool, error) {
+	if ok, err := f.short.Remove(ctx, id); err != nil || ok {
 		return ok, err
 	}
-	if ok, err := f.mid.Remove(id); err != nil || ok {
+	if ok, err := f.mid.Remove(ctx, id); err != nil || ok {
 		return ok, err
 	}
-	return f.long.Remove(id)
+	return f.long.Remove(ctx, id)
 }

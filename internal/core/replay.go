@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"errors"
 	"math"
 	"sort"
@@ -53,7 +54,7 @@ func NewReplayWorker(cfg config.Config, clock util.Clock,
 }
 
 // ExecuteReplayCycle runs one full cycle: decay → promote → replay.
-func (w *ReplayWorker) ExecuteReplayCycle() (ReplayStats, error) {
+func (w *ReplayWorker) ExecuteReplayCycle(ctx context.Context) (ReplayStats, error) {
 	w.mu.Lock()
 	if w.running {
 		w.mu.Unlock()
@@ -70,22 +71,22 @@ func (w *ReplayWorker) ExecuteReplayCycle() (ReplayStats, error) {
 	start := w.clock.NowMillis()
 	stats := ReplayStats{}
 
-	if err := w.applyDecay(start); err != nil {
+	if err := w.applyDecay(ctx, start); err != nil {
 		return stats, err
 	}
-	l0, err := w.promoteLayer0()
+	l0, err := w.promoteLayer0(ctx)
 	if err != nil {
 		return stats, err
 	}
 	stats.Layer0Promotions = l0
 
-	l1, err := w.promoteLayer1()
+	l1, err := w.promoteLayer1(ctx)
 	if err != nil {
 		return stats, err
 	}
 	stats.Layer1Promotions = l1
 
-	replayCount, err := w.replayConsolidation()
+	replayCount, err := w.replayConsolidation(ctx)
 	if err != nil {
 		return stats, err
 	}
@@ -104,18 +105,18 @@ func (w *ReplayWorker) NextReplayTime() int64 {
 	return w.lastTime + w.cfg.Replay.Frequency.Milliseconds()
 }
 
-func (w *ReplayWorker) applyDecay(now int64) error {
-	if err := w.short.ApplyDecay(now); err != nil {
+func (w *ReplayWorker) applyDecay(ctx context.Context, now int64) error {
+	if err := w.short.ApplyDecay(ctx, now); err != nil {
 		return err
 	}
-	if err := w.mid.ApplyDecay(now); err != nil {
+	if err := w.mid.ApplyDecay(ctx, now); err != nil {
 		return err
 	}
-	return w.long.ApplyDecay(now)
+	return w.long.ApplyDecay(ctx, now)
 }
 
-func (w *ReplayWorker) promoteLayer0() (int, error) {
-	candidates, err := w.short.GetAll()
+func (w *ReplayWorker) promoteLayer0(ctx context.Context) (int, error) {
+	candidates, err := w.short.GetAll(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -134,10 +135,10 @@ func (w *ReplayWorker) promoteLayer0() (int, error) {
 	count := 0
 	for _, p := range winners {
 		w.gates.MarkPromoted(p.event, types.MidTerm, p.d.Reason, p.d.Score)
-		if _, err := w.short.Remove(p.event.ID); err != nil {
+		if _, err := w.short.Remove(ctx, p.event.ID); err != nil {
 			return count, err
 		}
-		if err := w.mid.Add(p.event); err != nil {
+		if err := w.mid.Add(ctx, p.event); err != nil {
 			return count, err
 		}
 		count++
@@ -145,8 +146,8 @@ func (w *ReplayWorker) promoteLayer0() (int, error) {
 	return count, nil
 }
 
-func (w *ReplayWorker) promoteLayer1() (int, error) {
-	candidates, err := w.mid.GetAll()
+func (w *ReplayWorker) promoteLayer1(ctx context.Context) (int, error) {
+	candidates, err := w.mid.GetAll(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -156,7 +157,7 @@ func (w *ReplayWorker) promoteLayer1() (int, error) {
 	}
 	var winners []pair
 	for _, e := range candidates {
-		d, err := w.gates.ShouldPromoteToLayer2(e, w.mid)
+		d, err := w.gates.ShouldPromoteToLayer2(ctx, e, w.mid)
 		if err != nil {
 			return 0, err
 		}
@@ -168,10 +169,10 @@ func (w *ReplayWorker) promoteLayer1() (int, error) {
 	count := 0
 	for _, p := range winners {
 		w.gates.MarkPromoted(p.event, types.LongTerm, p.d.Reason, p.d.Score)
-		if _, err := w.mid.Remove(p.event.ID); err != nil {
+		if _, err := w.mid.Remove(ctx, p.event.ID); err != nil {
 			return count, err
 		}
-		if err := w.long.Add(p.event); err != nil {
+		if err := w.long.Add(ctx, p.event); err != nil {
 			return count, err
 		}
 		count++
@@ -179,16 +180,16 @@ func (w *ReplayWorker) promoteLayer1() (int, error) {
 	return count, nil
 }
 
-func (w *ReplayWorker) replayConsolidation() (int, error) {
+func (w *ReplayWorker) replayConsolidation(ctx context.Context) (int, error) {
 	batch := w.cfg.Replay.BatchSize
 	half := batch / 2
 	boost := w.cfg.Replay.ConsolidationBoost
 
-	l0, err := w.short.GetAll()
+	l0, err := w.short.GetAll(ctx)
 	if err != nil {
 		return 0, err
 	}
-	l1, err := w.mid.GetAll()
+	l1, err := w.mid.GetAll(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -196,14 +197,14 @@ func (w *ReplayWorker) replayConsolidation() (int, error) {
 	count := 0
 	for _, e := range topK(l0, half) {
 		w.boostScore(e, boost)
-		if err := w.short.Reindex(e); err != nil {
+		if err := w.short.Reindex(ctx, e); err != nil {
 			return count, err
 		}
 		count++
 	}
 	for _, e := range topK(l1, half) {
 		w.boostScore(e, boost)
-		if err := w.mid.Reindex(e); err != nil {
+		if err := w.mid.Reindex(ctx, e); err != nil {
 			return count, err
 		}
 		count++
